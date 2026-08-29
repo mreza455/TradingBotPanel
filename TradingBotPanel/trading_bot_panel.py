@@ -305,16 +305,17 @@ class PerformanceTracker:
 # ═══════════════════════════════════════════════════════════════════
 
 class PromptApprovalDialog(QDialog):
-    def __init__(self, original, enhanced, parent=None):
+    def __init__(self, original, enhanced, parent=None, review_round=1):
         super().__init__(parent)
-        self.setWindowTitle("تایید نهایی پرامپت توسط مدیر تیم")
+        self.setWindowTitle(f"تایید نهایی پرامپت توسط مدیر تیم (دور بررسی #{review_round})")
         self.setFixedSize(720, 520)
         self.setLayoutDirection(Qt.RightToLeft)
         self.setStyleSheet("QDialog { background-color: #1e1e2e; color: #cdd6f4; } QLabel { font-weight: bold; font-size: 12px;}")
+        self.original_enhanced = enhanced  # ذخیره نسخه اصلی برای مقایسه
         
         layout = QVBoxLayout(self)
         
-        header = QLabel("👑 مدیر تیم (Chief Agent - ChatGPT) پرامپت شما را بررسی کرد:\nنواقص برطرف شده و پارامترهای حرفه‌ای اضافه شدند. لطفاً مطالعه، ویرایش (در صورت نیاز) و تایید کنید:")
+        header = QLabel(f"👑 مدیر تیم (Chief Agent - ChatGPT) پرامپت شما را بررسی کرد (دور #{review_round}):\nنواقص برطرف شده و پارامترهای حرفه‌ای اضافه شدند. لطفاً مطالعه، ویرایش (در صورت نیاز) و تایید کنید:\n\n⚠️ اگر نکته‌ای اضافه کنید، مدیر تیم دوباره بررسی خواهد کرد.")
         header.setWordWrap(True)
         header.setStyleSheet("color: #89b4fa; padding: 8px; background-color: #181825; border-radius: 6px;")
         layout.addWidget(header)
@@ -331,6 +332,12 @@ class PromptApprovalDialog(QDialog):
 
     def get_final_prompt(self):
         return self.text_edit.toPlainText()
+    
+    def was_modified(self):
+        """بررسی آیا کاربر تغییری در پرامپت ایجاد کرده است"""
+        current_text = self.text_edit.toPlainText().strip()
+        original_text = self.original_enhanced.strip()
+        return current_text != original_text
 
 class AgentActionDialog(QDialog):
     def __init__(self, agent_name, agent_icon, score, parent=None):
@@ -376,7 +383,7 @@ class MultiAgentPipeline(QThread):
     log_message = pyqtSignal(str)
     progress_update = pyqtSignal(int)
     kpi_update = pyqtSignal()
-    request_prompt_approval = pyqtSignal(str, str) 
+    request_prompt_approval = pyqtSignal(str, str, int)  # original, enhanced, review_round
     request_agent_action = pyqtSignal(str, str, str, int)
     project_finished = pyqtSignal()
 
@@ -389,39 +396,70 @@ class MultiAgentPipeline(QThread):
         self.is_running = False
         self.pause_event = threading.Event()
         self.user_action_result = None
+        self.user_modified_prompt = False  # آیا کاربر پرامپت را تغییر داده
 
-    def resume_pipeline(self, result):
+    def resume_pipeline(self, result, was_modified=False):
         self.user_action_result = result
+        self.user_modified_prompt = was_modified
         self.pause_event.set()
 
     def run(self):
         self.is_running = True
         self.tracker.reset()
 
-        # ═══ فاز صفر: هوشمندسازی و تصویب پرامپت ═══
+        # ═══ فاز صفر: هوشمندسازی و تصویب پرامپت (حلقه تکرار) ═══
         self.log_message.emit("═"*60)
         self.log_message.emit("🚀 [فاز صفر]: بررسی و رفع نواقص پرامپت توسط مدیر تیم")
         self.log_message.emit("═"*60)
         self.status_update.emit("chatgpt", "connecting")
         time.sleep(1)
         
-        enhanced_prompt = f"📋 درخواست اولیه کاربر:\n{self.original_prompt}\n\n"
-        enhanced_prompt += "═"*50 + "\n👑 موارد اضافه شده توسط مدیر تیم (Chief - ChatGPT):\n" + "═"*50 + "\n\n"
-        enhanced_prompt += "🎯 مدیریت سرمایه (Money Management):\n  - ریسک ثابت: ۲٪ از اکوئیتی\n  - حداکثر دراودان: ۱۵٪\n"
-        enhanced_prompt += "🛡️ مدیریت ریسک:\n  - حد ضرر: داینامیک ATR\n  - حد سود: R:R = 1:2\n  - تریلینگ استاپ: 15 پیپ\n"
-        enhanced_prompt += "⏱️ زمان‌بندی و بازار:\n  - تایم‌فریم: H1\n  - جفت ارز: EURUSD\n  - فیلتر اخبار High Impact\n"
+        current_prompt = self.original_prompt
+        review_round = 1
+        approved = False
         
-        self.status_update.emit("chatgpt", "connected")
-        self.tracker.task("chatgpt", success=True, qual=95)
+        while not approved and self.is_running:
+            self.log_message.emit(f"\n🔄 [دور بررسی #{review_round}]: مدیر تیم در حال بررسی پرامپت...")
+            
+            # شبیه‌سازی بررسی و بهبود پرامپت توسط مدیر تیم
+            enhanced_prompt = f"📋 درخواست اولیه کاربر:\n{self.original_prompt}\n\n"
+            enhanced_prompt += "═"*50 + f"\n👑 موارد اضافه شده توسط مدیر تیم (Chief - ChatGPT) - دور #{review_round}:\n" + "═"*50 + "\n\n"
+            
+            if review_round == 1:
+                enhanced_prompt += "🎯 مدیریت سرمایه (Money Management):\n  - ریسک ثابت: ۲٪ از اکوئیتی\n  - حداکثر دراودان: ۱۵٪\n"
+                enhanced_prompt += "🛡️ مدیریت ریسک:\n  - حد ضرر: داینامیک ATR\n  - حد سود: R:R = 1:2\n  - تریلینگ استاپ: 15 پیپ\n"
+                enhanced_prompt += "⏱️ زمان‌بندی و بازار:\n  - تایم‌فریم: H1\n  - جفت ارز: EURUSD\n  - فیلتر اخبار High Impact\n"
+            else:
+                enhanced_prompt += f"📝 نکات اضافه شده توسط شما (دور #{review_round-1}):\n"
+                enhanced_prompt += f"{current_prompt}\n\n"
+                enhanced_prompt += "✅ بررسی و تایید نکات جدید توسط مدیر تیم\n"
+                enhanced_prompt += "🔧 بهبودها و اصلاحات اعمال شده:\n"
+                enhanced_prompt += "  - اصلاح پارامترهای ورودی\n  - بهبود منطق معاملاتی\n  - بهینه‌سازی عملکرد\n"
+            
+            self.status_update.emit("chatgpt", "connected")
+            self.tracker.task("chatgpt", success=True, qual=95)
+            
+            self.log_message.emit(f"⏳ [دور #{review_round}]: منتظر تایید پرامپت بهینه شده توسط شما...")
+            self.pause_event.clear()
+            self.request_prompt_approval.emit(self.original_prompt, enhanced_prompt, review_round)
+            self.pause_event.wait()
+            if not self.is_running: return
+            
+            final_prompt = self.user_action_result
+            was_modified = self.user_modified_prompt
+            
+            if was_modified:
+                # کاربر تغییراتی اعمال کرده - باید دوباره به مدیر تیم ارسال شود
+                self.log_message.emit(f"🔄 [دور #{review_round}]: شما نکات جدیدی اضافه کردید. ارسال به مدیر تیم برای بررسی مجدد...")
+                current_prompt = final_prompt
+                review_round += 1
+                self.progress_update.emit(min(5, review_round * 2))
+            else:
+                # کاربر بدون تغییر تایید کرده - می‌توان به تیم ارجاع داد
+                approved = True
+                self.log_message.emit(f"✅ [دور #{review_round}]: شما بدون تغییر تایید کردید. توزیع وظایف بین تیم...")
         
-        self.log_message.emit("⏳ منتظر تایید پرامپت بهینه شده توسط شما...")
-        self.pause_event.clear()
-        self.request_prompt_approval.emit(self.original_prompt, enhanced_prompt)
-        self.pause_event.wait()
         if not self.is_running: return
-        
-        final_prompt = self.user_action_result
-        self.log_message.emit("✅ مدیر تیم تاییدیه شما را دریافت کرد. توزیع وظایف بین تیم...")
         self.progress_update.emit(10)
 
         # ═══ فاز یک: تولید واقعی فایل‌ها و فولدرها ═══
@@ -1068,19 +1106,19 @@ class MainWindow(QMainWindow):
         self.pipe.project_finished.connect(self._on_project_finished)
         self.pipe.start()
 
-    @pyqtSlot(str, str)
-    def _show_prompt_dialog(self, orig, enhanced):
-        dialog = PromptApprovalDialog(orig, enhanced, self)
+    @pyqtSlot(str, str, int)
+    def _show_prompt_dialog(self, orig, enhanced, review_round):
+        dialog = PromptApprovalDialog(orig, enhanced, self, review_round)
         if dialog.exec_() == QDialog.Accepted: 
-            self.pipe.resume_pipeline(dialog.get_final_prompt())
+            self.pipe.resume_pipeline(dialog.get_final_prompt(), dialog.was_modified())
         else: 
-            self.pipe.resume_pipeline(orig) 
+            self.pipe.resume_pipeline(orig, False)
 
     @pyqtSlot(str, str, str, int)
     def _show_agent_dialog(self, tid, name, icon, score):
         dialog = AgentActionDialog(name, icon, score, self)
         dialog.exec_()
-        self.pipe.resume_pipeline(dialog.action)
+        self.pipe.resume_pipeline(dialog.action, False)
 
     def _on_project_finished(self):
         msg = QMessageBox(self)
